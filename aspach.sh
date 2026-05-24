@@ -14,9 +14,11 @@ INVENTORY_FILE="${INVENTORY_FILE:-${BASE_DIR}/inventory.txt}"
 DRY_RUN="${DRY_RUN:-false}"
 SUCCESSFUL_EXIT=false
 
-# Define files upfront to avoid "tee" errors in early log calls
-LOG_FILE="$LOG_DIR/backup_$(date +%Y%m%d_%H%M%S).log"
+# LOG_FILE is set after backup vs restore mode is known
+LOG_FILE=""
 PID_DIR="${LOG_DIR}/active_pids"
+MODE="backup"
+RESTORE_DIR=""
 
 # 1. Configuration Constants
 ASSUME_YES="${ASSUME_YES:-false}"
@@ -28,29 +30,34 @@ RCLONE_CHECKERS="${RCLONE_CHECKERS:-8}"
 usage() {
     echo "Usage: $0 [options]"
     echo ""
-    echo "MANDATORY PARAMETERS:"
-    echo "  -s <path>    Source directory (Main folder to backup)"
-    echo "  -r <remote>  Rclone remote target (e.g., gdrive:backup)"
+    echo "BACKUP (PC -> Google Drive):"
+    echo "  -s <path>    Source directory to back up"
+    echo "  -r <remote>  Rclone remote (e.g., gdrive:backup)"
+    echo ""
+    echo "RESTORE (Google Drive -> PC, extract archives):"
+    echo "  -d <path>    Destination directory to restore into"
+    echo "  -r <remote>  Same remote used for backup"
     echo ""
     echo "OPTIONAL PARAMETERS (with default values):"
-    echo "  -g <num>     Split threshold in GB              [Default: 10]"
-    echo "  -j <num>     Parallel compression jobs          [Default: 2]"
-    echo "  -t <path>    Staging directory                  [Default: ~/.aspach/staging]"
-    echo "  -l <path>    Log directory                      [Default: ~/.aspach/logs]"
-    echo "  -i <file>    Inventory file                     [Default: ~/.aspach/inventory.txt]"
-    echo "  -T <num>     Rclone parallel transfers          [Default: 8]"
-    echo "  -C <num>     Rclone parallel checkers           [Default: 8]"
-    echo "  -n           Dry-run (Simulation) mode          [Default: false]"
-    echo "  -y           Assume Yes (Skip confirmations)    [Default: false]"
+    echo "  -g <num>     Split threshold in GB (backup only)   [Default: 10]"
+    echo "  -j <num>     Parallel compression jobs (backup)    [Default: 2]"
+    echo "  -t <path>    Staging directory                     [Default: ~/.aspach/staging]"
+    echo "  -l <path>    Log directory                         [Default: ~/.aspach/logs]"
+    echo "  -i <file>    Inventory file (backup only)          [Default: ~/.aspach/inventory.txt]"
+    echo "  -T <num>     Rclone parallel transfers             [Default: 8]"
+    echo "  -C <num>     Rclone parallel checkers              [Default: 8]"
+    echo "  -n           Dry-run (Simulation) mode             [Default: false]"
+    echo "  -y           Assume Yes (Skip confirmations)       [Default: false]"
     echo "  -h           Show this help message"
     echo ""
     exit 1
 }
 
 # 2. Parse Command Line Arguments
-while getopts "s:t:r:i:j:l:g:T:C:nyh" opt; do
+while getopts "s:t:r:i:j:l:g:T:C:nyd:h" opt; do
     case $opt in
         s) SOURCE_DIR="$OPTARG" ;;
+        d) RESTORE_DIR="$OPTARG" ;;
         t) STAGING_DIR="$OPTARG" ;;
         r) RCLONE_REMOTE="$OPTARG" ;;
         i) INVENTORY_FILE="$OPTARG" ;;
@@ -65,6 +72,20 @@ while getopts "s:t:r:i:j:l:g:T:C:nyh" opt; do
         *) usage ;;
     esac
 done
+
+if [ -n "$RESTORE_DIR" ] && [ -n "$SOURCE_DIR" ]; then
+    echo "[ERR] Cannot use -s (backup) and -d (restore) together." >&2
+    exit 1
+fi
+if [ -n "$RESTORE_DIR" ]; then
+    MODE=restore
+elif [ -n "$SOURCE_DIR" ]; then
+    MODE=backup
+else
+    echo "[ERR] Specify -s <source> for backup or -d <dest> for restore." >&2
+    exit 1
+fi
+LOG_FILE="$LOG_DIR/${MODE}_$(date +%Y%m%d_%H%M%S).log"
 
 check_halt() {
     [ -f "$HALT_FILE" ] && exit 1
@@ -95,7 +116,7 @@ cleanup() {
     if [ "$SUCCESSFUL_EXIT" = true ]; then
         rm -rf "$PID_DIR" 2>/dev/null
         if [ -n "$STAGING_DIR" ] && [ -d "$STAGING_DIR" ]; then
-            rm -f "$STAGING_DIR"/*_tmp.* >/dev/null 2>&1
+            rm -f "$STAGING_DIR"/*_tmp.* "$STAGING_DIR"/*.tar.zst "$STAGING_DIR"/*.tar.gz >/dev/null 2>&1
         fi
         rm -f "$HALT_FILE" 2>/dev/null
         rm -f "$BACKUP_FAIL_MARKER" 2>/dev/null
@@ -134,7 +155,7 @@ cleanup() {
     # 4. Remove temp files (including the halt file)
     if [ -n "$STAGING_DIR" ] && [ -d "$STAGING_DIR" ]; then
         log "[INFO] Removing temporary files from $STAGING_DIR..."
-        rm -f "$STAGING_DIR"/*_tmp.* >/dev/null 2>&1
+        rm -f "$STAGING_DIR"/*_tmp.* "$STAGING_DIR"/*.tar.zst "$STAGING_DIR"/*.tar.gz >/dev/null 2>&1
     fi
     rm -f "$HALT_FILE" 2>/dev/null
     rm -f "${INVENTORY_FILE}.lock" 2>/dev/null
@@ -155,11 +176,17 @@ confirm() {
 # Dependency check
 check_dependencies() {
     local missing_deps=()
-    for cmd in rclone tar md5sum; do
+    local cmd
+    for cmd in rclone tar; do
         if ! command -v "$cmd" >/dev/null 2>&1; then
             missing_deps+=("$cmd")
         fi
     done
+    if [ "$MODE" = backup ]; then
+        if ! command -v md5sum >/dev/null 2>&1; then
+            missing_deps+=("md5sum")
+        fi
+    fi
 
     if [ ${#missing_deps[@]} -gt 0 ]; then
         echo "[ERR] Missing required dependencies: ${missing_deps[*]}" >&2
@@ -176,23 +203,26 @@ HALT_FILE="${LOG_DIR}/.halt_$$"
 BACKUP_FAIL_MARKER="${LOG_DIR}/.backup_failed_$$"
 rm -rf "$PID_DIR"/* "$HALT_FILE" "$BACKUP_FAIL_MARKER"
 rm -f "${LOG_DIR}/.halt_*" 2>/dev/null  # Cleanup orphans from previous crashes
-touch "$INVENTORY_FILE"
+[ "$MODE" = backup ] && touch "$INVENTORY_FILE"
 
 # PRE-FLIGHT LOGGING
 log "--------------------------------------------------------"
-log "BACKUP PROCESS STARTED"
+if [ "$MODE" = restore ]; then
+    log "RESTORE PROCESS STARTED"
+else
+    log "BACKUP PROCESS STARTED"
+fi
 log "--------------------------------------------------------"
 log "WARNING: NO WARRANTY - Use this script at your own risk."
 log "Log File  : $LOG_FILE"
-log "PID Dir   : $PID_DIR"
+log "Mode      : $MODE"
+[ "$MODE" = backup ] && log "PID Dir   : $PID_DIR"
 
-# --- SOURCE & REMOTE VALIDATION ---
-if [ -z "$SOURCE_DIR" ]; then echo "[ERR] SOURCE_DIR is missing!"; exit 1; fi
+# --- REMOTE VALIDATION ---
 if [ -z "$RCLONE_REMOTE" ]; then
     echo "[ERR] RCLONE_REMOTE is missing!"; rclone listremotes | sed 's/^/  - /'; exit 1
 fi
 
-# Normalize Remote Path (Remove trailing slashes for consistency)
 RCLONE_REMOTE="${RCLONE_REMOTE%/}"
 
 REMOTE_NAME="${RCLONE_REMOTE%%:*}"
@@ -200,31 +230,41 @@ if ! rclone listremotes | grep -Eq "^${REMOTE_NAME}:[[:space:]]*$"; then
     echo "[ERR] Remote '${REMOTE_NAME}:' not found!"; rclone listremotes | sed 's/^/  - /'; exit 1
 fi
 
-# Target folder check
-log "[INFO] Verifying destination '$RCLONE_REMOTE/current'..."
-REMOTE_CONTENT=$(rclone lsf "$RCLONE_REMOTE/current" --max-depth 1 2>/dev/null)
-if [ -n "$REMOTE_CONTENT" ]; then
-    log "[WARNING] Destination folder is NOT empty!"
-    if ! confirm "Proceed regardless?"; then exit 1; fi
+REMOTE_CURRENT="$RCLONE_REMOTE/current"
+
+if [ "$MODE" = restore ]; then
+    log "Remote    : $RCLONE_REMOTE"
+    log "Restore to: $RESTORE_DIR"
+    if [ "$DRY_RUN" = true ]; then log "MODE      : TEST (DRY-RUN)"; fi
+    log "--------------------------------------------------------"
+else
+    # --- BACKUP-ONLY REMOTE SETUP ---
+    log "[INFO] Verifying destination '$REMOTE_CURRENT'..."
+    REMOTE_CONTENT=$(rclone lsf "$REMOTE_CURRENT" --max-depth 1 2>/dev/null)
+    if [ -n "$REMOTE_CONTENT" ]; then
+        log "[WARNING] Destination folder is NOT empty!"
+        if ! confirm "Proceed regardless?"; then exit 1; fi
+    fi
+
+    log "[INFO] Ensuring remote target folder exists..."
+    rclone mkdir "$REMOTE_CURRENT" 2>/dev/null
+
+    log "Source    : $SOURCE_DIR"
+    log "Remote    : $RCLONE_REMOTE"
+    log "Threshold : Split at ${SPLIT_THRESHOLD_GB}GB"
+    if [ "$DRY_RUN" = true ]; then log "MODE      : TEST (DRY-RUN)"; fi
+    log "--------------------------------------------------------"
 fi
 
-# PRE-CREATION: Create target folder upfront to prevent parallel race conditions (Duplicate 'current' folder fix)
-log "[INFO] Ensuring remote target folder exists..."
-rclone mkdir "$RCLONE_REMOTE/current" 2>/dev/null
-
-log "Source    : $SOURCE_DIR"
-log "Remote    : $RCLONE_REMOTE"
-log "Threshold : Split at ${SPLIT_THRESHOLD_GB}GB"
-if [ "$DRY_RUN" = true ]; then log "MODE      : TEST (DRY-RUN)"; fi
-log "--------------------------------------------------------"
-
-# Tool Check
+# Tool Check (backup compression + restore extract)
 if command -v zstd >/dev/null 2>&1; then
     COMPRESS_CMD="tar --mtime=2020-01-01 --owner=0 --group=0 --numeric-owner -I zstd -cf"
     EXT="tar.zst"
+    HAS_ZSTD=true
 else
     COMPRESS_CMD="tar --mtime=2020-01-01 --owner=0 --group=0 --numeric-owner -czf"
     EXT="tar.gz"
+    HAS_ZSTD=false
 fi
 
 get_items_state_hash() {
@@ -268,6 +308,92 @@ update_inventory() {
         printf '%s\t%s\n' "$hash" "$key" >> "${INVENTORY_FILE}.tmp"
         mv "${INVENTORY_FILE}.tmp" "$INVENTORY_FILE"
     ) 200>"${INVENTORY_FILE}.lock"
+}
+
+extract_archive() {
+    local archive="$1"
+    local dest="$2"
+
+    case "$archive" in
+        *.tar.zst)
+            if [ "$HAS_ZSTD" != true ]; then
+                log "[ERR] zstd is required to extract: $(basename "$archive")"
+                return 1
+            fi
+            tar -I zstd -xf "$archive" -C "$dest"
+            ;;
+        *.tar.gz)
+            tar -xzf "$archive" -C "$dest"
+            ;;
+        *)
+            log "[ERR] Unsupported archive type: $(basename "$archive")"
+            return 1
+            ;;
+    esac
+}
+
+run_restore() {
+    local remote_current="$REMOTE_CURRENT"
+    local archives=()
+    local arch staging_path restore_failures=0
+
+    mkdir -p "$RESTORE_DIR" "$STAGING_DIR"
+
+    if [ -n "$(ls -A "$RESTORE_DIR" 2>/dev/null)" ]; then
+        log "[WARNING] Restore destination is not empty: $RESTORE_DIR"
+        if ! confirm "Proceed? Existing files may be overwritten."; then
+            return 1
+        fi
+    fi
+
+    log "[INFO] Listing archives in $remote_current ..."
+    mapfile -t archives < <(rclone lsf "$remote_current" 2>/dev/null | grep -E '\.tar\.(zst|gz)$' || true)
+    archives=("${archives[@]%/}")
+
+    if [ ${#archives[@]} -eq 0 ]; then
+        log "[ERR] No backup archives found in $remote_current"
+        mark_backup_failed
+        return 1
+    fi
+
+    log "[INFO] Found ${#archives[@]} archive(s) to restore."
+
+    for arch in "${archives[@]}"; do
+        check_halt
+        log "[>] Restoring: $arch"
+
+        if [ "$DRY_RUN" = true ]; then
+            log "[DRY] Would download and extract: $arch -> $RESTORE_DIR"
+            continue
+        fi
+
+        staging_path="$STAGING_DIR/$arch"
+        if ! rclone copyto "$remote_current/$arch" "$staging_path" \
+            -P --transfers "$RCLONE_TRANSFERS" --checkers "$RCLONE_CHECKERS"; then
+            log "[ERR] Download failed: $arch"
+            mark_backup_failed
+            ((restore_failures++)) || true
+            continue
+        fi
+
+        if ! extract_archive "$staging_path" "$RESTORE_DIR"; then
+            log "[ERR] Extract failed: $arch"
+            mark_backup_failed
+            rm -f "$staging_path"
+            ((restore_failures++)) || true
+            continue
+        fi
+
+        rm -f "$staging_path"
+        log "[OK] Restored: $arch"
+    done
+
+    if [ "$restore_failures" -gt 0 ]; then
+        return 1
+    fi
+    log "[INFO] All archives extracted under: $RESTORE_DIR"
+    log "[INFO] Note: file contents match backup; timestamps were normalized to 2020-01-01 during backup."
+    return 0
 }
 
 # Core function to handle an individual "Partition" (One or more items)
@@ -327,7 +453,7 @@ process_partition() {
         --drive-acknowledge-abuse
     )
 
-    rclone copyto "$archive_path" "$RCLONE_REMOTE/current/$archive_label.$EXT" "${r_flags[@]}"
+    rclone copyto "$archive_path" "$REMOTE_CURRENT/$archive_label.$EXT" "${r_flags[@]}"
 
     if [ $? -eq 0 ]; then
         log "[OK] Success: $archive_label"
@@ -404,6 +530,26 @@ process_source_root_files() {
     process_partition "$SOURCE_DIR" "_ROOT" "${root_files[@]}"
 }
 
+# --- RESTORE MAIN ---
+if [ "$MODE" = restore ]; then
+    run_restore
+    BACKUP_HAD_FAILURES=false
+    [ -f "$BACKUP_FAIL_MARKER" ] && BACKUP_HAD_FAILURES=true
+    rm -f "$BACKUP_FAIL_MARKER"
+
+    log "--------------------------------------------------------"
+    if [ "$BACKUP_HAD_FAILURES" = true ]; then
+        log "RESTORE PROCESS COMPLETED WITH ERRORS."
+    else
+        log "RESTORE PROCESS COMPLETED."
+    fi
+    log "--------------------------------------------------------"
+    SUCCESSFUL_EXIT=true
+    [ "$BACKUP_HAD_FAILURES" = true ] && exit 1
+    exit 0
+fi
+
+# --- BACKUP MAIN ---
 # --- SOURCE LAYOUT CHECK ---
 has_subdir=false
 has_root_files=false
