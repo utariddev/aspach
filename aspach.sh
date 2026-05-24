@@ -261,10 +261,18 @@ process_partition() {
     # 4. Upload
     log "[^] Uploading: $archive_label..."
     local old_path="$RCLONE_REMOTE/old_versions/$(date '+%Y%m%d-%H%M')"
-    # -P added for progress (shows transfer speed and ETA)
-    local r_flags="-P -v --backup-dir $old_path --checksum --drive-chunk-size 128M --transfers $RCLONE_TRANSFERS --checkers $RCLONE_CHECKERS --drive-acknowledge-abuse"
-    
-    rclone copyto "$archive_path" "$RCLONE_REMOTE/current/$archive_label.$EXT" $r_flags
+    # Use an array to prevent word splitting on paths containing spaces or special characters
+    local r_flags=(
+        -P -v
+        --backup-dir "$old_path"
+        --checksum
+        --drive-chunk-size 128M
+        --transfers "$RCLONE_TRANSFERS"
+        --checkers "$RCLONE_CHECKERS"
+        --drive-acknowledge-abuse
+    )
+
+    rclone copyto "$archive_path" "$RCLONE_REMOTE/current/$archive_label.$EXT" "${r_flags[@]}"
 
     if [ $? -eq 0 ]; then
         log "[OK] Success: $archive_label"
