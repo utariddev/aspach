@@ -239,8 +239,10 @@ update_inventory() {
     local hash="$2"
     (
         flock -x 200
-        grep -v "^$key:" "$INVENTORY_FILE" > "${INVENTORY_FILE}.tmp" 2>/dev/null
-        echo "$key:$hash" >> "${INVENTORY_FILE}.tmp"
+        # Format: "<hash> <key>" — hash is always 32 hex chars with no spaces,
+        # so storing it first avoids ':' delimiter blindness on keys with colons.
+        awk -v key="$key" '$2 != key' "$INVENTORY_FILE" > "${INVENTORY_FILE}.tmp" 2>/dev/null
+        echo "$hash $key" >> "${INVENTORY_FILE}.tmp"
         mv "${INVENTORY_FILE}.tmp" "$INVENTORY_FILE"
     ) 200>"${INVENTORY_FILE}.lock"
 }
@@ -257,7 +259,7 @@ process_partition() {
     
     # 1. Change Detection
     local current_hash=$(get_items_state_hash "$parent_dir" "${items[@]}")
-    local stored_hash=$(grep "^$archive_label:" "$INVENTORY_FILE" | cut -d':' -f2)
+    local stored_hash=$(awk -v key="$archive_label" '$2 == key {print $1}' "$INVENTORY_FILE")
     
     if [ "$current_hash" == "$stored_hash" ]; then
         log "[-] Skip (No changes): $archive_label"
