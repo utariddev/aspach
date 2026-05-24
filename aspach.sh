@@ -20,7 +20,6 @@ PID_DIR="${LOG_DIR}/active_pids"
 
 # 1. Configuration Constants
 ASSUME_YES="${ASSUME_YES:-false}"
-LARGE_THRESHOLD_GB="${LARGE_THRESHOLD_GB:-50}"
 SPLIT_THRESHOLD_GB="${SPLIT_THRESHOLD_GB:-10}" # Partition folders larger than this
 MAX_JOBS="${MAX_JOBS:-2}"
 RCLONE_TRANSFERS="${RCLONE_TRANSFERS:-8}"
@@ -234,15 +233,34 @@ get_items_state_hash() {
     find "${full_paths[@]}" -type f -printf '%p %s %T@\n' 2>/dev/null | sort | md5sum | cut -d' ' -f1
 }
 
+inventory_get_stored_hash() {
+    local key="$1"
+    awk -v key="$key" '
+        {
+            idx = index($0, "\t")
+            if (idx == 0) next
+            if (substr($0, idx + 1) == key) {
+                print substr($0, 1, idx - 1)
+                exit
+            }
+        }
+    ' "$INVENTORY_FILE"
+}
+
 update_inventory() {
     local key="$1"
     local hash="$2"
     (
         flock -x 200
-        # Format: "<hash> <key>" — hash is always 32 hex chars with no spaces,
-        # so storing it first avoids ':' delimiter blindness on keys with colons.
-        awk -v key="$key" '$2 != key' "$INVENTORY_FILE" > "${INVENTORY_FILE}.tmp" 2>/dev/null
-        echo "$hash $key" >> "${INVENTORY_FILE}.tmp"
+        # Format: "<hash><TAB><key>" (key may contain spaces)
+        awk -v key="$key" '
+            {
+                idx = index($0, "\t")
+                if (idx > 0 && substr($0, idx + 1) == key) next
+                print
+            }
+        ' "$INVENTORY_FILE" > "${INVENTORY_FILE}.tmp" 2>/dev/null
+        printf '%s\t%s\n' "$hash" "$key" >> "${INVENTORY_FILE}.tmp"
         mv "${INVENTORY_FILE}.tmp" "$INVENTORY_FILE"
     ) 200>"${INVENTORY_FILE}.lock"
 }
@@ -259,7 +277,8 @@ process_partition() {
     
     # 1. Change Detection
     local current_hash=$(get_items_state_hash "$parent_dir" "${items[@]}")
-    local stored_hash=$(awk -v key="$archive_label" '$2 == key {print $1}' "$INVENTORY_FILE")
+    local stored_hash
+    stored_hash=$(inventory_get_stored_hash "$archive_label")
     
     if [ "$current_hash" == "$stored_hash" ]; then
         log "[-] Skip (No changes): $archive_label"
