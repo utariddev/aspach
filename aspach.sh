@@ -12,10 +12,11 @@ INVENTORY_FILE="${INVENTORY_FILE:-${BASE_DIR}/inventory.txt}"
 
 # RCLONE_REMOTE must be provided by user
 DRY_RUN="${DRY_RUN:-false}"
+SUCCESSFUL_EXIT=false
 
 # Define files upfront to avoid "tee" errors in early log calls
 LOG_FILE="$LOG_DIR/backup_$(date +%Y%m%d_%H%M%S).log"
-PID_FILE="${LOG_DIR}/active_pids.txt"
+PID_DIR="${LOG_DIR}/active_pids"
 
 # 1. Configuration Constants
 ASSUME_YES="${ASSUME_YES:-false}"
@@ -88,22 +89,33 @@ cleanup() {
     [ "$CLEANUP_RUNNING" = true ] && return
     CLEANUP_RUNNING=true
 
+    # Handle successful exit gracefully without emergency warnings
+    if [ "$SUCCESSFUL_EXIT" = true ]; then
+        rm -rf "$PID_DIR" 2>/dev/null
+        if [ -n "$STAGING_DIR" ] && [ -d "$STAGING_DIR" ]; then
+            rm -f "$STAGING_DIR"/*_tmp.* >/dev/null 2>&1
+        fi
+        rm -f "$HALT_FILE" 2>/dev/null
+        rm -f "${INVENTORY_FILE}.lock" 2>/dev/null
+        return
+    fi
+
     # Create HALT_FILE immediately to stop new processes
     touch "$HALT_FILE" 2>/dev/null
 
     log "[INFO] Emergency stop triggered. Halted all operations."
     log "[INFO] Cleaning up all processes..."
     
-    # 1. Kill background PIDs tracked in PID_FILE
-    if [ -f "$PID_FILE" ]; then
-        log "[INFO] Reading PIDs from $PID_FILE..."
-        local pids_to_kill=$(cat "$PID_FILE")
+    # 1. Kill background PIDs tracked in PID_DIR
+    if [ -d "$PID_DIR" ]; then
+        log "[INFO] Reading PIDs from $PID_DIR..."
+        local pids_to_kill=$(ls "$PID_DIR" 2>/dev/null)
         for pid in $pids_to_kill; do
             log "[INFO] Killing subshell PID: $pid and its children..."
             pkill -9 -P "$pid" 2>/dev/null
             kill -9 "$pid" 2>/dev/null
         done
-        rm -f "$PID_FILE"
+        rm -rf "$PID_DIR"
     fi
 
     # 2. Kill all rclone processes started by this script (targeted)
@@ -154,12 +166,11 @@ check_dependencies() {
 check_dependencies
 
 # Ensure directories exist
-mkdir -p "$STAGING_DIR" "$LOG_DIR" "$(dirname "$INVENTORY_FILE")"
+mkdir -p "$STAGING_DIR" "$LOG_DIR" "$(dirname "$INVENTORY_FILE")" "$PID_DIR"
 
 # Reset files for a fresh start
-PID_FILE="${LOG_DIR}/active_pids.txt"
 HALT_FILE="${LOG_DIR}/.halt_$$"
-rm -f "$PID_FILE" "$HALT_FILE"
+rm -rf "$PID_DIR"/* "$HALT_FILE"
 rm -f "${LOG_DIR}/.halt_*" 2>/dev/null  # Cleanup orphans from previous crashes
 touch "$INVENTORY_FILE"
 
@@ -169,7 +180,7 @@ log "BACKUP PROCESS STARTED"
 log "--------------------------------------------------------"
 log "WARNING: NO WARRANTY - Use this script at your own risk."
 log "Log File  : $LOG_FILE"
-log "PID File  : $PID_FILE"
+log "PID Dir   : $PID_DIR"
 
 # --- SOURCE & REMOTE VALIDATION ---
 if [ -z "$SOURCE_DIR" ]; then echo "[ERR] SOURCE_DIR is missing!"; exit 1; fi
@@ -356,9 +367,12 @@ for f in "$SOURCE_DIR"/*/; do
     f=${f%/}
     folder_name=$(basename "$f")
     # Call the recursive processor (Starts at level 0)
-    recursive_process_folder "$f" "$folder_name" &
+    (
+        recursive_process_folder "$f" "$folder_name"
+        rm -f "$PID_DIR/$BASHPID" 2>/dev/null
+    ) &
     # Track PID for reliable cleanup
-    echo $! >> "$PID_FILE"
+    touch "$PID_DIR/$!"
     
     ((JOB_COUNT++))
     if [ "$JOB_COUNT" -ge "$MAX_JOBS" ]; then
@@ -370,3 +384,4 @@ wait
 log "--------------------------------------------------------"
 log "BACKUP PROCESS COMPLETED."
 log "--------------------------------------------------------"
+SUCCESSFUL_EXIT=true
