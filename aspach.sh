@@ -283,7 +283,7 @@ get_items_state_hash() {
     for item in "${items[@]}"; do
         full_paths+=("$parent/$item")
     done
-    find "${full_paths[@]}" -type f -printf '%p %s %T@\n' 2>/dev/null | sort | md5sum | cut -d' ' -f1
+    find "${full_paths[@]}" -type f -printf '%P %s %T@\n' 2>/dev/null | sort | md5sum | cut -d' ' -f1
 }
 
 inventory_get_stored_hash() {
