@@ -390,8 +390,40 @@ recursive_process_folder() {
     fi
 }
 
+# Archive loose files sitting directly under SOURCE_DIR
+process_source_root_files() {
+    check_halt
+    local item root_files=()
+    shopt -s dotglob nullglob
+    for item in "$SOURCE_DIR"/*; do
+        [[ -e "$item" && ! -d "$item" ]] && root_files+=("$(basename "$item")")
+    done
+    shopt -u dotglob nullglob
+    [ ${#root_files[@]} -eq 0 ] && return 0
+    log "[INFO] Backing up ${#root_files[@]} file(s) from source root as _ROOT"
+    process_partition "$SOURCE_DIR" "_ROOT" "${root_files[@]}"
+}
+
+# --- SOURCE LAYOUT CHECK ---
+has_subdir=false
+has_root_files=false
+shopt -s dotglob nullglob
+for f in "$SOURCE_DIR"/*; do
+    [ -d "$f" ] && has_subdir=true
+    [[ -e "$f" && ! -d "$f" ]] && has_root_files=true
+    [ "$has_subdir" = true ] && [ "$has_root_files" = true ] && break
+done
+shopt -u dotglob nullglob
+if [ "$has_subdir" = false ] && [ "$has_root_files" = false ]; then
+    log "[ERR] Source is empty: $SOURCE_DIR"
+    log "[ERR] Nothing to back up (no files or subdirectories at source root)."
+    SUCCESSFUL_EXIT=true
+    exit 1
+fi
+
 # --- MAIN LOOP ---
 JOB_COUNT=0
+shopt -s dotglob
 for f in "$SOURCE_DIR"/*/; do
     check_halt
     [ -e "$f" ] || continue
@@ -410,7 +442,10 @@ for f in "$SOURCE_DIR"/*/; do
         wait -n; ((JOB_COUNT--))
     fi
 done
+shopt -u dotglob
 wait
+
+process_source_root_files
 
 BACKUP_HAD_FAILURES=false
 [ -f "$BACKUP_FAIL_MARKER" ] && BACKUP_HAD_FAILURES=true
