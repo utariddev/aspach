@@ -191,9 +191,9 @@ fi
 # Normalize Remote Path (Remove trailing slashes for consistency)
 RCLONE_REMOTE="${RCLONE_REMOTE%/}"
 
-REMOTE_NAME="${RCLONE_REMOTE%%:*}:"
-if ! rclone listremotes | grep -Fxq "$REMOTE_NAME"; then
-    echo "[ERR] Remote '$REMOTE_NAME' not found!"; rclone listremotes | sed 's/^/  - /'; exit 1
+REMOTE_NAME="${RCLONE_REMOTE%%:*}"
+if ! rclone listremotes | grep -Eq "^${REMOTE_NAME}:[[:space:]]*$"; then
+    echo "[ERR] Remote '${REMOTE_NAME}:' not found!"; rclone listremotes | sed 's/^/  - /'; exit 1
 fi
 
 # Target folder check
