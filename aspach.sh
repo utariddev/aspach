@@ -122,7 +122,8 @@ cleanup() {
         rm -f "$STAGING_DIR"/*_tmp.* >/dev/null 2>&1
     fi
     rm -f "$HALT_FILE" 2>/dev/null
-    
+    rm -f "${INVENTORY_FILE}.lock" 2>/dev/null
+
     log "[INFO] Cleanup complete."
 }
 
@@ -209,9 +210,12 @@ get_items_state_hash() {
 update_inventory() {
     local key="$1"
     local hash="$2"
-    grep -v "^$key:" "$INVENTORY_FILE" > "${INVENTORY_FILE}.tmp" 2>/dev/null
-    echo "$key:$hash" >> "${INVENTORY_FILE}.tmp"
-    mv "${INVENTORY_FILE}.tmp" "$INVENTORY_FILE"
+    (
+        flock -x 200
+        grep -v "^$key:" "$INVENTORY_FILE" > "${INVENTORY_FILE}.tmp" 2>/dev/null
+        echo "$key:$hash" >> "${INVENTORY_FILE}.tmp"
+        mv "${INVENTORY_FILE}.tmp" "$INVENTORY_FILE"
+    ) 200>"${INVENTORY_FILE}.lock"
 }
 
 # Core function to handle an individual "Partition" (One or more items)
