@@ -66,9 +66,12 @@ while getopts "s:t:r:i:j:l:g:T:C:nyh" opt; do
     esac
 done
 
-# --- HELPER FUNCTIONS ---
 check_halt() {
     [ -f "$HALT_FILE" ] && exit 1
+}
+
+mark_backup_failed() {
+    touch "$BACKUP_FAIL_MARKER" 2>/dev/null
 }
 
 log() {
@@ -95,6 +98,7 @@ cleanup() {
             rm -f "$STAGING_DIR"/*_tmp.* >/dev/null 2>&1
         fi
         rm -f "$HALT_FILE" 2>/dev/null
+        rm -f "$BACKUP_FAIL_MARKER" 2>/dev/null
         rm -f "${INVENTORY_FILE}.lock" 2>/dev/null
         return
     fi
@@ -169,7 +173,8 @@ mkdir -p "$STAGING_DIR" "$LOG_DIR" "$(dirname "$INVENTORY_FILE")" "$PID_DIR"
 
 # Reset files for a fresh start
 HALT_FILE="${LOG_DIR}/.halt_$$"
-rm -rf "$PID_DIR"/* "$HALT_FILE"
+BACKUP_FAIL_MARKER="${LOG_DIR}/.backup_failed_$$"
+rm -rf "$PID_DIR"/* "$HALT_FILE" "$BACKUP_FAIL_MARKER"
 rm -f "${LOG_DIR}/.halt_*" 2>/dev/null  # Cleanup orphans from previous crashes
 touch "$INVENTORY_FILE"
 
@@ -303,7 +308,9 @@ process_partition() {
     
     if [ $? -ne 0 ]; then
         log "[ERR] Compression failed: $archive_label"
-        rm -f "$archive_path"; return 1
+        rm -f "$archive_path"
+        mark_backup_failed
+        return 1
     fi
 
     # 4. Upload
@@ -325,11 +332,14 @@ process_partition() {
     if [ $? -eq 0 ]; then
         log "[OK] Success: $archive_label"
         update_inventory "$archive_label" "$current_hash"
-    else
-        log "[ERR] Upload failed: $archive_label"
+        rm -f "$archive_path"
+        return 0
     fi
 
+    log "[ERR] Upload failed: $archive_label"
     rm -f "$archive_path"
+    mark_backup_failed
+    return 1
 }
 
 # Recursive function to determine if a folder should be split or treated as one
@@ -402,7 +412,16 @@ for f in "$SOURCE_DIR"/*/; do
 done
 wait
 
+BACKUP_HAD_FAILURES=false
+[ -f "$BACKUP_FAIL_MARKER" ] && BACKUP_HAD_FAILURES=true
+rm -f "$BACKUP_FAIL_MARKER"
+
 log "--------------------------------------------------------"
-log "BACKUP PROCESS COMPLETED."
+if [ "$BACKUP_HAD_FAILURES" = true ]; then
+    log "BACKUP PROCESS COMPLETED WITH ERRORS."
+else
+    log "BACKUP PROCESS COMPLETED."
+fi
 log "--------------------------------------------------------"
 SUCCESSFUL_EXIT=true
+[ "$BACKUP_HAD_FAILURES" = true ] && exit 1
