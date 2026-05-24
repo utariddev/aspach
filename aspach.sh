@@ -1,5 +1,13 @@
 #!/bin/bash
 
+# Parallel backup jobs use "wait -n" (added in Bash 4.3).
+if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 3) )); then
+    echo "[ERR] aspach.sh requires Bash 4.3 or newer." >&2
+    echo "      Current: Bash ${BASH_VERSION}" >&2
+    echo "      Reason: parallel backup uses 'wait -n' (not available before 4.3)." >&2
+    exit 1
+fi
+
 # --- DEFAULTS ---
 # SOURCE_DIR must be provided by user
 

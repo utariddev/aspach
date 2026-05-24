@@ -23,6 +23,7 @@ By default, the script manages its state and temporary files in `~/.aspach/`:
 
 ## Prerequisites
 
+- **Bash 4.3+**: Required for parallel job control (`wait -n`).
 - **rclone**: Configured with a remote (e.g., Google Drive).
 - **tar**: For archiving.
 - **zstd** (Optional): Faster and better compression (falls back to `gzip` if not found).
