@@ -137,6 +137,22 @@ confirm() {
 }
 
 # --- PRE-FLIGHT ---
+# Dependency check
+check_dependencies() {
+    local missing_deps=()
+    for cmd in rclone tar md5sum; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            missing_deps+=("$cmd")
+        fi
+    done
+
+    if [ ${#missing_deps[@]} -gt 0 ]; then
+        echo "[ERR] Missing required dependencies: ${missing_deps[*]}" >&2
+        exit 1
+    fi
+}
+check_dependencies
+
 # Ensure directories exist
 mkdir -p "$STAGING_DIR" "$LOG_DIR" "$(dirname "$INVENTORY_FILE")"
 
