@@ -24,7 +24,6 @@ SUCCESSFUL_EXIT=false
 
 # LOG_FILE is set after backup vs restore mode is known
 LOG_FILE=""
-PID_DIR="${LOG_DIR}/active_pids"
 MODE="backup"
 RESTORE_DIR=""
 
@@ -81,6 +80,11 @@ while getopts "s:t:r:i:j:l:g:T:C:nyd:h" opt; do
     esac
 done
 
+if [[ "$STAGING_DIR" == "/" || "$STAGING_DIR" == "$HOME" || "$STAGING_DIR" == "/tmp" ]]; then
+    echo "[ERR] Cannot use '$STAGING_DIR' as a staging directory!" >&2
+    exit 1
+fi
+
 if [ -n "$RESTORE_DIR" ] && [ -n "$SOURCE_DIR" ]; then
     echo "[ERR] Cannot use -s (backup) and -d (restore) together." >&2
     exit 1
@@ -120,59 +124,49 @@ cleanup() {
     [ "$CLEANUP_RUNNING" = true ] && return
     CLEANUP_RUNNING=true
 
-    # Handle successful exit gracefully without emergency warnings
+    # On successful exit, only clean up temporary locks and files
     if [ "$SUCCESSFUL_EXIT" = true ]; then
-        rm -rf "$PID_DIR" 2>/dev/null
+        rm -f "$HALT_FILE" "${INVENTORY_FILE}.lock" "$BACKUP_FAIL_MARKER" 2>/dev/null
         if [ -n "$STAGING_DIR" ] && [ -d "$STAGING_DIR" ]; then
-            rm -f "$STAGING_DIR"/*_tmp.* "$STAGING_DIR"/*.tar.zst "$STAGING_DIR"/*.tar.gz >/dev/null 2>&1
+            # Only remove temp files created by this specific script instance
+            rm -f "$STAGING_DIR"/aspach_tmp_${$}_* 2>/dev/null
         fi
-        rm -f "$HALT_FILE" 2>/dev/null
-        rm -f "$BACKUP_FAIL_MARKER" 2>/dev/null
-        rm -f "${INVENTORY_FILE}.lock" 2>/dev/null
         return
     fi
 
-    # Create HALT_FILE immediately to stop new processes
+    # EMERGENCY CLEANUP (Ctrl+C or Error state)
+    # 1. Ignore new signals to prevent infinite loops and self-termination
+    trap '' INT TERM EXIT
+
     touch "$HALT_FILE" 2>/dev/null
-
     log "[INFO] Emergency stop triggered. Halted all operations."
-    log "[INFO] Cleaning up all processes..."
-    
-    # 1. Kill background PIDs tracked in PID_DIR
-    if [ -d "$PID_DIR" ]; then
-        log "[INFO] Reading PIDs from $PID_DIR..."
-        local pids_to_kill=$(ls "$PID_DIR" 2>/dev/null)
-        for pid in $pids_to_kill; do
-            log "[INFO] Killing subshell PID: $pid and its children..."
-            pkill -9 -P "$pid" 2>/dev/null
-            kill -9 "$pid" 2>/dev/null
-        done
-        rm -rf "$PID_DIR"
-    fi
 
-    # 2. Kill all rclone processes started by this script (targeted)
-    # We use -f to match the script's remote to avoid killing unrelated rclones
-    if [ -n "$RCLONE_REMOTE" ]; then
-        log "[INFO] Performing targeted pkill for rclone on $RCLONE_REMOTE..."
-        pkill -9 -f "rclone.*$RCLONE_REMOTE" 2>/dev/null
+    # 2. Perform file cleanup FIRST so no garbage is left on disk even if the script dies [1]
+    if [ -n "$STAGING_DIR" ] && [ -d "$STAGING_DIR" ]; then
+        log "[INFO] Removing temporary backup archives..."
+        rm -f "$STAGING_DIR"/aspach_tmp_${$}_* 2>/dev/null
     fi
+    rm -f "$HALT_FILE" "${INVENTORY_FILE}.lock" "$BACKUP_FAIL_MARKER" 2>/dev/null
 
-    # 3. Final safety kill for any direct children
+    # 3. Send TERM signal to the entire process group.
+    # Since the parent script now ignores TERM (trap ''), it won't die, but all child processes (rclone/tar) will.
+    log "[INFO] Sending termination signal to all background jobs..."
+    kill -TERM -$$ 2>/dev/null
+    sleep 1
+
+    # 4. Forcefully terminate any surviving child processes.
+    # pkill -9 -P $$ only kills direct child processes of this script, not the parent itself.
     pkill -9 -P $$ 2>/dev/null
 
-    # 4. Remove temp files (including the halt file)
-    if [ -n "$STAGING_DIR" ] && [ -d "$STAGING_DIR" ]; then
-        log "[INFO] Removing temporary files from $STAGING_DIR..."
-        rm -f "$STAGING_DIR"/*_tmp.* "$STAGING_DIR"/*.tar.zst "$STAGING_DIR"/*.tar.gz >/dev/null 2>&1
-    fi
-    rm -f "$HALT_FILE" 2>/dev/null
-    rm -f "${INVENTORY_FILE}.lock" 2>/dev/null
-
     log "[INFO] Cleanup complete."
+    exit 1
 }
 
-# Register cleanup to run on script exit or interrupt
-trap cleanup EXIT INT TERM
+# Signal Handlers
+# When a signal is caught, set the successful exit flag to false and exit.
+# The exit command automatically triggers the EXIT trap (cleanup).
+trap 'SUCCESSFUL_EXIT=false; exit 1' INT TERM
+trap cleanup EXIT
 
 confirm() {
     [ "$ASSUME_YES" = true ] && return 0
@@ -204,12 +198,12 @@ check_dependencies() {
 check_dependencies
 
 # Ensure directories exist
-mkdir -p "$STAGING_DIR" "$LOG_DIR" "$(dirname "$INVENTORY_FILE")" "$PID_DIR"
+mkdir -p "$STAGING_DIR" "$LOG_DIR" "$(dirname "$INVENTORY_FILE")"
 
 # Reset files for a fresh start
 HALT_FILE="${LOG_DIR}/.halt_$$"
 BACKUP_FAIL_MARKER="${LOG_DIR}/.backup_failed_$$"
-rm -rf "$PID_DIR"/* "$HALT_FILE" "$BACKUP_FAIL_MARKER"
+rm -f "$HALT_FILE" "$BACKUP_FAIL_MARKER"
 rm -f "${LOG_DIR}/.halt_*" 2>/dev/null  # Cleanup orphans from previous crashes
 [ "$MODE" = backup ] && touch "$INVENTORY_FILE"
 
@@ -224,7 +218,6 @@ log "--------------------------------------------------------"
 log "WARNING: NO WARRANTY - Use this script at your own risk."
 log "Log File  : $LOG_FILE"
 log "Mode      : $MODE"
-[ "$MODE" = backup ] && log "PID Dir   : $PID_DIR"
 
 # --- REMOTE VALIDATION ---
 if [ -z "$RCLONE_REMOTE" ]; then
@@ -411,8 +404,7 @@ process_partition() {
     local archive_label="$2" # Label for inventory/filename (e.g. Photos_2023)
     shift 2
     local items=("$@")       # List of items relative to parent_dir
-
-    local archive_path="$STAGING_DIR/${archive_label}_tmp.$EXT"
+    local archive_path="$STAGING_DIR/aspach_tmp_${$}_${archive_label}.$EXT"
     
     # 1. Change Detection
     local current_hash=$(get_items_state_hash "$parent_dir" "${items[@]}")
@@ -424,7 +416,7 @@ process_partition() {
         return 0
     fi
 
-    # 2. Size Detection (Sum the items)
+    # 2. Size Detection
     local total_size_hr=$(du -sch "${items[@]/#/$parent_dir/}" 2>/dev/null | tail -n1 | cut -f1)
     log "[*] Processing: $archive_label ($total_size_hr) [${#items[@]} items]"
     if [ -n "$stored_hash" ]; then
@@ -584,12 +576,7 @@ for f in "$SOURCE_DIR"/*/; do
     f=${f%/}
     folder_name=$(basename "$f")
     # Call the recursive processor (Starts at level 0)
-    (
-        recursive_process_folder "$f" "$folder_name"
-        rm -f "$PID_DIR/$BASHPID" 2>/dev/null
-    ) &
-    # Track PID for reliable cleanup
-    touch "$PID_DIR/$!"
+    recursive_process_folder "$f" "$folder_name" &
     
     ((JOB_COUNT++))
     if [ "$JOB_COUNT" -ge "$MAX_JOBS" ]; then
