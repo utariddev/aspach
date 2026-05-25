@@ -357,8 +357,21 @@ run_restore() {
         return 1
     fi
 
+    # Fail-fast check for zstd before downloading anything
+    if [ "$HAS_ZSTD" != true ]; then
+        for arch in "${archives[@]}"; do
+            if [[ "$arch" == *.tar.zst ]]; then
+                log "[ERR] One or more archives require 'zstd' to extract, but 'zstd' is missing."
+                log "[ERR] Please install 'zstd' and try again to prevent mid-run failures."
+                return 1
+            fi
+        done
+    fi
+
     log "[INFO] Found ${#archives[@]} archive(s) to restore."
 
+    # Run restore jobs in parallel using MAX_JOBS pool
+    local JOB_COUNT=0
     for arch in "${archives[@]}"; do
         check_halt
         log "[>] Restoring: $arch"
@@ -368,26 +381,40 @@ run_restore() {
             continue
         fi
 
-        staging_path="$STAGING_DIR/$arch"
-        if ! rclone copyto "$remote_current/$arch" "$staging_path" \
-            -P --transfers "$RCLONE_TRANSFERS" --checkers "$RCLONE_CHECKERS"; then
-            log "[ERR] Download failed: $arch"
-            mark_backup_failed
-            ((restore_failures++)) || true
-            continue
-        fi
+        # Use unique prefix to prevent staging directory leaks on emergency stop [1]
+        staging_path="$STAGING_DIR/aspach_tmp_${$}_restore_$arch"
 
-        if ! extract_archive "$staging_path" "$RESTORE_DIR"; then
-            log "[ERR] Extract failed: $arch"
-            mark_backup_failed
+        (
+            if ! rclone copyto "$remote_current/$arch" "$staging_path" \
+                -P --transfers "$RCLONE_TRANSFERS" --checkers "$RCLONE_CHECKERS" >/dev/null 2>&1; then
+                log "[ERR] Download failed: $arch"
+                mark_backup_failed
+                exit 1
+            fi
+
+            if ! extract_archive "$staging_path" "$RESTORE_DIR" >/dev/null 2>&1; then
+                log "[ERR] Extract failed: $arch"
+                mark_backup_failed
+                rm -f "$staging_path"
+                exit 1
+            fi
+
             rm -f "$staging_path"
-            ((restore_failures++)) || true
-            continue
-        fi
+            log "[OK] Restored: $arch"
+        ) &
 
-        rm -f "$staging_path"
-        log "[OK] Restored: $arch"
+        ((JOB_COUNT++))
+        if [ "$JOB_COUNT" -ge "$MAX_JOBS" ]; then
+            wait -n || ((restore_failures++))
+            ((JOB_COUNT--))
+        fi
     done
+    wait
+
+    # Check for any failures registered during background parallel jobs
+    if [ -f "$BACKUP_FAIL_MARKER" ]; then
+        restore_failures=1
+    fi
 
     if [ "$restore_failures" -gt 0 ]; then
         return 1
