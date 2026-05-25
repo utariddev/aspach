@@ -553,6 +553,14 @@ if [ "$MODE" = restore ]; then
 fi
 
 # --- BACKUP MAIN ---
+
+# 1. Source Directory Existence Check
+if [ ! -d "$SOURCE_DIR" ]; then
+    log "[ERR] SOURCE_DIR '$SOURCE_DIR' does not exist or is not a directory!"
+    SUCCESSFUL_EXIT=true # Prevent emergency warnings during clean exit
+    exit 1
+fi
+
 # --- SOURCE LAYOUT CHECK ---
 has_subdir=false
 has_root_files=false
@@ -573,6 +581,13 @@ fi
 # --- MAIN LOOP ---
 JOB_COUNT=0
 shopt -s dotglob
+
+#Run root files backup in parallel alongside other folder jobs
+if [ "$has_root_files" = true ]; then
+    process_source_root_files &
+    ((JOB_COUNT++))
+fi
+
 for f in "$SOURCE_DIR"/*/; do
     check_halt
     [ -e "$f" ] || continue
@@ -588,8 +603,6 @@ for f in "$SOURCE_DIR"/*/; do
 done
 shopt -u dotglob
 wait
-
-process_source_root_files
 
 BACKUP_HAD_FAILURES=false
 [ -f "$BACKUP_FAIL_MARKER" ] && BACKUP_HAD_FAILURES=true
