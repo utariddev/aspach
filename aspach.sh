@@ -484,12 +484,17 @@ recursive_process_folder() {
         local small_items=()
         local big_item_found=false
 
+        # Save current dotglob state and enable it to include hidden files
+        local dotglob_saved
+        dotglob_saved=$(shopt -p dotglob)
+        shopt -s dotglob
+
         declare -A item_sizes
         while read -r size path; do
             item_sizes["$path"]=$size
         done < <(du -sb "$dir"/* 2>/dev/null)
 
-        # Iterate over all items (files and folders)
+        # Iterate over all items (including hidden files and folders)
         for item in "$dir"/*; do
             [ -e "$item" ] || continue
             local item_name=$(basename "$item")
@@ -505,6 +510,9 @@ recursive_process_folder() {
             fi
         done
         
+        # Restore original dotglob state safely
+        eval "$dotglob_saved"
+
         # Process all collected small items together as a MISC partition
         if [ ${#small_items[@]} -gt 0 ]; then
             if [ "$big_item_found" = true ]; then
@@ -523,11 +531,19 @@ recursive_process_folder() {
 process_source_root_files() {
     check_halt
     local item root_files=()
+    
+    # Save original shell options safely
+    local shopt_saved
+    shopt_saved=$(shopt -p dotglob nullglob)
     shopt -s dotglob nullglob
+    
     for item in "$SOURCE_DIR"/*; do
         [[ -e "$item" && ! -d "$item" ]] && root_files+=("$(basename "$item")")
     done
-    shopt -u dotglob nullglob
+    
+    # Restore original shell options immediately after the loop
+    eval "$shopt_saved"
+    
     [ ${#root_files[@]} -eq 0 ] && return 0
     log "[INFO] Backing up ${#root_files[@]} file(s) from source root as _ROOT"
     process_partition "$SOURCE_DIR" "_ROOT" "${root_files[@]}"
