@@ -499,7 +499,14 @@ process_partition() {
 recursive_process_folder() {
     check_halt
     local dir="$1"
-    local label="$2"
+    
+    # Calculate relative path from SOURCE_DIR
+    local rel_path="${dir#$SOURCE_DIR/}"
+    
+    # Mathematically escape '@' and replace '/' with '@' to prevent collisions
+    local escaped_path="${rel_path//@/@@}"
+    local label="${escaped_path//\//@}"
+    
     local folder_name=$(basename "$dir")
     local parent_dir=$(dirname "$dir")
     local folder_size_bytes=$(du -sb "$dir" | cut -f1)
@@ -528,9 +535,8 @@ recursive_process_folder() {
             local item_size=${item_sizes["$item"]:-0}
 
             if [ -d "$item" ] && [ "$item_size" -gt $((SPLIT_THRESHOLD_GB * 1024 * 1024 * 1024)) ]; then
-                # Big sub-directory: Recurse
                 big_item_found=true
-                recursive_process_folder "$item" "${label}_${item_name}"
+                recursive_process_folder "$item"
             else
                 # Small sub-directory or a file: Collect for grouping
                 small_items+=("$folder_name/$item_name")
@@ -635,9 +641,7 @@ for f in "$SOURCE_DIR"/*/; do
     check_halt
     [ -e "$f" ] || continue
     f=${f%/}
-    folder_name=$(basename "$f")
-    # Call the recursive processor (Starts at level 0)
-    recursive_process_folder "$f" "$folder_name" &
+    recursive_process_folder "$f" &
     
     ((JOB_COUNT++))
     if [ "$JOB_COUNT" -ge "$MAX_JOBS" ]; then
