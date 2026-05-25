@@ -227,7 +227,7 @@ fi
 RCLONE_REMOTE="${RCLONE_REMOTE%/}"
 
 REMOTE_NAME="${RCLONE_REMOTE%%:*}"
-if ! rclone listremotes | grep -Eq "^${REMOTE_NAME}:[[:space:]]*$"; then
+if ! rclone listremotes | grep -Fxq "${REMOTE_NAME}:"; then
     echo "[ERR] Remote '${REMOTE_NAME}:' not found!"; rclone listremotes | sed 's/^/  - /'; exit 1
 fi
 
