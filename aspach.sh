@@ -484,11 +484,16 @@ recursive_process_folder() {
         local small_items=()
         local big_item_found=false
 
+        declare -A item_sizes
+        while read -r size path; do
+            item_sizes["$path"]=$size
+        done < <(du -sb "$dir"/* 2>/dev/null)
+
         # Iterate over all items (files and folders)
         for item in "$dir"/*; do
             [ -e "$item" ] || continue
             local item_name=$(basename "$item")
-            local item_size=$(du -sb "$item" | cut -f1)
+            local item_size=${item_sizes["$item"]:-0}
 
             if [ -d "$item" ] && [ "$item_size" -gt $((SPLIT_THRESHOLD_GB * 1024 * 1024 * 1024)) ]; then
                 # Big sub-directory: Recurse
@@ -505,8 +510,6 @@ recursive_process_folder() {
             if [ "$big_item_found" = true ]; then
                 process_partition "$parent_dir" "${label}_MISC" "${small_items[@]}"
             else
-                # If everything was small but the total was somehow large (edge case)
-                # Just zip the whole folder normally
                 process_partition "$parent_dir" "$label" "$folder_name"
             fi
         fi
