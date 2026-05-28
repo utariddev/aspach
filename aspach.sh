@@ -272,11 +272,11 @@ get_items_state_hash() {
     local parent="$1"
     shift
     local items=("$@")
-    local full_paths=()
-    for item in "${items[@]}"; do
-        full_paths+=("$parent/$item")
-    done
-    find "${full_paths[@]}" -type f -printf '%P %s %T@\n' 2>/dev/null | sort | md5sum | cut -d' ' -f1
+    # Subshell isolation prevents cd side-effects. %p with cd ensures relative paths with empty-P safety.
+    (
+        cd "$parent" || exit 1
+        find "${items[@]}" -type f -printf '%p %s %T@\n' 2>/dev/null | sort | md5sum | cut -d' ' -f1
+    )
 }
 
 inventory_get_stored_hash() {
@@ -298,7 +298,7 @@ update_inventory() {
     local hash="$2"
     (
         flock -x 200
-        # Format: "<hash><TAB><key>" (key may contain spaces)
+        # Format: "<hash><TAB><key>"
         awk -v key="$key" '
             {
                 idx = index($0, "\t")
@@ -455,7 +455,7 @@ process_partition() {
         return 0
     fi
 
-    # 3. Compress (Strictly relative to SOURCE_DIR to preserve hierarchy)
+    # 3. Compress
     log "[>] Compressing: $archive_label..."
     $COMPRESS_CMD "$archive_path" -C "$SOURCE_DIR" "${items[@]}"
     
@@ -469,6 +469,7 @@ process_partition() {
     # 4. Upload
     log "[^] Uploading: $archive_label..."
     local old_path="$RCLONE_REMOTE/old_versions/$(date '+%Y%m%d-%H%M')"
+    # Use an array to prevent word splitting on paths containing spaces or special characters
     local r_flags=(
         -P -v
         --backup-dir "$old_path"
@@ -534,7 +535,7 @@ recursive_process_folder() {
             local item_rel_path="${item#$SOURCE_DIR/}"
 
             if [ -d "$item" ] && [ "$item_size" -gt $((SPLIT_THRESHOLD_GB * 1024 * 1024 * 1024)) ]; then
-                # Big sub-directory: Recurse
+                # Big sub-directory
                 big_item_found=true
                 recursive_process_folder "$item"
             else
@@ -641,6 +642,7 @@ for f in "$SOURCE_DIR"/*/; do
     check_halt
     [ -e "$f" ] || continue
     f=${f%/}
+    # Call the recursive processor
     recursive_process_folder "$f" &
     
     ((JOB_COUNT++))
