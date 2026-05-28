@@ -427,14 +427,14 @@ run_restore() {
 # Core function to handle an individual "Partition" (One or more items)
 process_partition() {
     check_halt
-    local parent_dir="$1"    # The parent directory (e.g. /home/user/Source)
-    local archive_label="$2" # Label for inventory/filename (e.g. Photos_2023)
-    shift 2
-    local items=("$@")       # List of items relative to parent_dir
+    local archive_label="$1" # Label for inventory/filename (e.g. saraybosna@vidya59)
+    shift
+    local items=("$@")       # List of items relative to SOURCE_DIR
+
     local archive_path="$STAGING_DIR/aspach_tmp_${$}_${archive_label}.$EXT"
     
-    # 1. Change Detection
-    local current_hash=$(get_items_state_hash "$parent_dir" "${items[@]}")
+    # 1. Change Detection (Using SOURCE_DIR as base)
+    local current_hash=$(get_items_state_hash "$SOURCE_DIR" "${items[@]}")
     local stored_hash
     stored_hash=$(inventory_get_stored_hash "$archive_label")
     
@@ -444,7 +444,7 @@ process_partition() {
     fi
 
     # 2. Size Detection
-    local total_size_hr=$(du -sch "${items[@]/#/$parent_dir/}" 2>/dev/null | tail -n1 | cut -f1)
+    local total_size_hr=$(du -sch "${items[@]/#/$SOURCE_DIR/}" 2>/dev/null | tail -n1 | cut -f1)
     log "[*] Processing: $archive_label ($total_size_hr) [${#items[@]} items]"
     if [ -n "$stored_hash" ]; then
         log "[INFO] Previous version found. Archiving to old_versions/"
@@ -455,9 +455,9 @@ process_partition() {
         return 0
     fi
 
-    # 3. Compress
+    # 3. Compress (Strictly relative to SOURCE_DIR to preserve hierarchy)
     log "[>] Compressing: $archive_label..."
-    $COMPRESS_CMD "$archive_path" -C "$parent_dir" "${items[@]}"
+    $COMPRESS_CMD "$archive_path" -C "$SOURCE_DIR" "${items[@]}"
     
     if [ $? -ne 0 ]; then
         log "[ERR] Compression failed: $archive_label"
@@ -469,7 +469,6 @@ process_partition() {
     # 4. Upload
     log "[^] Uploading: $archive_label..."
     local old_path="$RCLONE_REMOTE/old_versions/$(date '+%Y%m%d-%H%M')"
-    # Use an array to prevent word splitting on paths containing spaces or special characters
     local r_flags=(
         -P -v
         --backup-dir "$old_path"
@@ -508,7 +507,6 @@ recursive_process_folder() {
     local label="${escaped_path//\//@}"
     
     local folder_name=$(basename "$dir")
-    local parent_dir=$(dirname "$dir")
     local folder_size_bytes=$(du -sb "$dir" | cut -f1)
 
     if [ "$folder_size_bytes" -gt $((SPLIT_THRESHOLD_GB * 1024 * 1024 * 1024)) ]; then
@@ -533,13 +531,15 @@ recursive_process_folder() {
             [ -e "$item" ] || continue
             local item_name=$(basename "$item")
             local item_size=${item_sizes["$item"]:-0}
+            local item_rel_path="${item#$SOURCE_DIR/}"
 
             if [ -d "$item" ] && [ "$item_size" -gt $((SPLIT_THRESHOLD_GB * 1024 * 1024 * 1024)) ]; then
+                # Big sub-directory: Recurse
                 big_item_found=true
                 recursive_process_folder "$item"
             else
-                # Small sub-directory or a file: Collect for grouping
-                small_items+=("$folder_name/$item_name")
+                # Small sub-directory or a file: Collect using its relative path to SOURCE_DIR
+                small_items+=("$item_rel_path")
             fi
         done
         
@@ -549,14 +549,14 @@ recursive_process_folder() {
         # Process all collected small items together as a MISC partition
         if [ ${#small_items[@]} -gt 0 ]; then
             if [ "$big_item_found" = true ]; then
-                process_partition "$parent_dir" "${label}_MISC" "${small_items[@]}"
+                process_partition "${label}_MISC" "${small_items[@]}"
             else
-                process_partition "$parent_dir" "$label" "$folder_name"
+                process_partition "$label" "$rel_path"
             fi
         fi
     else
         # Small enough to zip as one
-        process_partition "$parent_dir" "$label" "$folder_name"
+        process_partition "$label" "$rel_path"
     fi
 }
 
@@ -579,7 +579,7 @@ process_source_root_files() {
     
     [ ${#root_files[@]} -eq 0 ] && return 0
     log "[INFO] Backing up ${#root_files[@]} file(s) from source root as _ROOT"
-    process_partition "$SOURCE_DIR" "_ROOT" "${root_files[@]}"
+    process_partition "_ROOT" "${root_files[@]}"
 }
 
 # --- RESTORE MAIN ---
