@@ -259,11 +259,11 @@ fi
 
 # Tool Check (backup compression + restore extract)
 if command -v zstd >/dev/null 2>&1; then
-    COMPRESS_CMD="tar --mtime=2020-01-01 --owner=0 --group=0 --numeric-owner -I zstd -cf"
+    COMPRESS_CMD="tar --owner=0 --group=0 --numeric-owner -I zstd -cf"
     EXT="tar.zst"
     HAS_ZSTD=true
 else
-    COMPRESS_CMD="tar --mtime=2020-01-01 --owner=0 --group=0 --numeric-owner -czf"
+    COMPRESS_CMD="tar --owner=0 --group=0 --numeric-owner -czf"
     EXT="tar.gz"
     HAS_ZSTD=false
 fi
@@ -420,7 +420,6 @@ run_restore() {
         return 1
     fi
     log "[INFO] All archives extracted under: $RESTORE_DIR"
-    log "[INFO] Note: file contents match backup; timestamps were normalized to 2020-01-01 during backup."
     return 0
 }
 
