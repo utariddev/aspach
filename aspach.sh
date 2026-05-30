@@ -515,9 +515,10 @@ recursive_process_folder() {
     # Calculate relative path from SOURCE_DIR
     local rel_path="${dir#$SOURCE_DIR/}"
     
-    # Mathematically escape '@' and replace '/' with '@' to prevent collisions
-    local escaped_path="${rel_path//@/@@}"
-    local label="${escaped_path//\//@}"
+    # Mathematically escape '#' to '##', '@' to '@@' and replace '/' with '@'
+    local temp="${rel_path//#/##}"
+    local temp2="${temp//@/@@}"
+    local label="${temp2//\//@}"
     
     local folder_name=$(basename "$dir")
     local folder_size_bytes=$(du -sb "$dir" | cut -f1)
@@ -528,6 +529,8 @@ recursive_process_folder() {
         
         local small_items=()
         local big_item_found=false
+        local chunk_index=1
+        local accumulated_size=0
 
         # Save current dotglob state and enable it to include hidden files
         local dotglob_saved
@@ -546,6 +549,13 @@ recursive_process_folder() {
             local item_size=${item_sizes["$item"]:-0}
             local item_rel_path="${item#$SOURCE_DIR/}"
 
+            # Warning for single massive files
+            if [ ! -d "$item" ] && [ "$item_size" -gt $((SPLIT_THRESHOLD_GB * 1024 * 1024 * 1024)) ]; then
+                local file_size_hr=$(du -sh "$item" 2>/dev/null | cut -f1)
+                log "[WARNING] Single large file detected: $item_rel_path ($file_size_hr)"
+                log "[WARNING] Continuous chunking is not supported for single files. Staging space of at least $file_size_hr is required."
+            fi
+
             if [ -d "$item" ] && [ "$item_size" -gt $((SPLIT_THRESHOLD_GB * 1024 * 1024 * 1024)) ]; then
                 # Big sub-directory
                 big_item_found=true
@@ -553,6 +563,17 @@ recursive_process_folder() {
             else
                 # Small sub-directory or a file: Collect using its relative path to SOURCE_DIR
                 small_items+=("$item_rel_path")
+                ((accumulated_size += item_size))
+
+                # Continuous Chunk-Grouping Trigger
+                if [ "$accumulated_size" -gt $((SPLIT_THRESHOLD_GB * 1024 * 1024 * 1024)) ]; then
+                    # Package this chunk immediately using the safe '#' system delimiter
+                    process_partition "${label}#part${chunk_index}" "${small_items[@]}"
+                    # Reset variables for the next chunk
+                    small_items=()
+                    accumulated_size=0
+                    ((chunk_index++))
+                fi
             fi
         done
         
@@ -561,9 +582,11 @@ recursive_process_folder() {
 
         # Process any remaining small items in the last part
         if [ ${#small_items[@]} -gt 0 ]; then
-            if [ "$big_item_found" = true ]; then
-                process_partition "${label}_MISC" "${small_items[@]}"
+            if [ "$big_item_found" = true ] || [ "$chunk_index" -gt 1 ]; then
+                # Use unified '#part' suffix for remaining small files
+                process_partition "${label}#part${chunk_index}" "${small_items[@]}"
             else
+                # If everything was small and never exceeded the split threshold, zip as one
                 process_partition "$label" "$rel_path"
             fi
         fi
