@@ -285,10 +285,10 @@ get_items_state_hash() {
     local parent="$1"
     shift
     local items=("$@")
-    # Subshell isolation prevents cd side-effects. %p with cd ensures relative paths with empty-P safety.
+    # Subshell isolation prevents cd side-effects.
     (
         cd "$parent" || exit 1
-        find "${items[@]}" -type f -printf '%p %s %T@\n' 2>/dev/null | sort | md5sum | cut -d' ' -f1
+        find "${items[@]}" -type f -printf '%p %s %Ts\n' 2>/dev/null | sort | md5sum | cut -d' ' -f1
     )
 }
 
