@@ -141,7 +141,7 @@ cleanup() {
     touch "$HALT_FILE" 2>/dev/null
     log "[INFO] Emergency stop triggered. Halted all operations."
 
-    # 2. Perform file cleanup FIRST so no garbage is left on disk even if the script dies [1]
+    # 2. Perform file cleanup FIRST so no garbage is left on disk even if the script dies
     if [ -n "$STAGING_DIR" ] && [ -d "$STAGING_DIR" ]; then
         log "[INFO] Removing temporary backup archives..."
         rm -f "$STAGING_DIR"/aspach_tmp_${$}_* 2>/dev/null
@@ -255,6 +255,19 @@ else
     log "Threshold : Split at ${SPLIT_THRESHOLD_GB}GB"
     if [ "$DRY_RUN" = true ]; then log "MODE      : TEST (DRY-RUN)"; fi
     log "--------------------------------------------------------"
+fi
+
+# --- DISASTER RECOVERY ---
+if [ "$MODE" = backup ]; then
+    if [ ! -s "$INVENTORY_FILE" ]; then
+        log "[INFO] Local inventory is missing or empty. Checking remote for cloud manifest..."
+        if rclone cat "$RCLONE_REMOTE/inventory.txt" > "$INVENTORY_FILE" 2>/dev/null; then
+            log "[OK] Disaster recovery active: Restored inventory database from cloud manifest."
+        else
+            log "[INFO] No cloud manifest found. Starting with a fresh inventory."
+            touch "$INVENTORY_FILE"
+        fi
+    fi
 fi
 
 # Tool Check (backup compression + restore extract)
@@ -381,7 +394,7 @@ run_restore() {
             continue
         fi
 
-        # Use unique prefix to prevent staging directory leaks on emergency stop [1]
+        # Use unique prefix to prevent staging directory leaks on emergency stop
         staging_path="$STAGING_DIR/aspach_tmp_${$}_restore_$arch"
 
         (
@@ -546,7 +559,7 @@ recursive_process_folder() {
         # Restore original dotglob state safely
         eval "$dotglob_saved"
 
-        # Process all collected small items together as a MISC partition
+        # Process any remaining small items in the last part
         if [ ${#small_items[@]} -gt 0 ]; then
             if [ "$big_item_found" = true ]; then
                 process_partition "${label}_MISC" "${small_items[@]}"
@@ -661,6 +674,11 @@ if [ "$BACKUP_HAD_FAILURES" = true ]; then
     log "BACKUP PROCESS COMPLETED WITH ERRORS."
 else
     log "BACKUP PROCESS COMPLETED."
+    # Back up the inventory database to the cloud as a manifest
+    if [ "$DRY_RUN" != true ]; then
+        log "[INFO] Backing up inventory file to cloud manifest..."
+        rclone copyto "$INVENTORY_FILE" "$RCLONE_REMOTE/inventory.txt" 2>/dev/null
+    fi
 fi
 log "--------------------------------------------------------"
 SUCCESSFUL_EXIT=true
