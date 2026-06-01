@@ -103,8 +103,8 @@ check_halt() {
     [ -f "$HALT_FILE" ] && exit 1
 }
 
-mark_backup_failed() {
-    touch "$BACKUP_FAIL_MARKER" 2>/dev/null
+mark_job_failed() {
+    touch "$JOB_FAIL_MARKER" 2>/dev/null
 }
 
 log() {
@@ -126,7 +126,7 @@ cleanup() {
 
     # On successful exit, only clean up temporary locks and files
     if [ "$SUCCESSFUL_EXIT" = true ]; then
-        rm -f "$HALT_FILE" "${INVENTORY_FILE}.lock" "$BACKUP_FAIL_MARKER" 2>/dev/null
+        rm -f "$HALT_FILE" "${INVENTORY_FILE}.lock" "$JOB_FAIL_MARKER" 2>/dev/null
         if [ -n "$STAGING_DIR" ] && [ -d "$STAGING_DIR" ]; then
             # Only remove temp files created by this specific script instance
             rm -f "$STAGING_DIR"/aspach_tmp_${$}_* 2>/dev/null
@@ -146,7 +146,7 @@ cleanup() {
         log "[INFO] Removing temporary backup archives..."
         rm -f "$STAGING_DIR"/aspach_tmp_${$}_* 2>/dev/null
     fi
-    rm -f "$HALT_FILE" "${INVENTORY_FILE}.lock" "$BACKUP_FAIL_MARKER" 2>/dev/null
+    rm -f "$HALT_FILE" "${INVENTORY_FILE}.lock" "$JOB_FAIL_MARKER" 2>/dev/null
 
     # 3. Send TERM signal to the entire process group.
     # Since the parent script now ignores TERM (trap ''), it won't die, but all child processes (rclone/tar) will.
@@ -202,8 +202,8 @@ mkdir -p "$STAGING_DIR" "$LOG_DIR" "$(dirname "$INVENTORY_FILE")"
 
 # Reset files for a fresh start
 HALT_FILE="${LOG_DIR}/.halt_$$"
-BACKUP_FAIL_MARKER="${LOG_DIR}/.backup_failed_$$"
-rm -f "$HALT_FILE" "$BACKUP_FAIL_MARKER"
+JOB_FAIL_MARKER="${LOG_DIR}/.job_failed_$$"
+rm -f "$HALT_FILE" "$JOB_FAIL_MARKER"
 rm -f "${LOG_DIR}/.halt_*" 2>/dev/null  # Cleanup orphans from previous crashes
 [ "$MODE" = backup ] && touch "$INVENTORY_FILE"
 
@@ -212,7 +212,7 @@ log "--------------------------------------------------------"
 if [ "$MODE" = restore ]; then
     log "RESTORE PROCESS STARTED"
 else
-    log "BACKUP PROCESS STARTED"
+    log "BACKUP STARTED"
 fi
 log "--------------------------------------------------------"
 log "WARNING: NO WARRANTY - Use this script at your own risk."
@@ -351,12 +351,34 @@ run_restore() {
     local archives=()
     local arch staging_path restore_failures=0
 
+    # Clean up any orphaned temporary restore files from previous crashes/SIGKILLs
+    if [ -d "$STAGING_DIR" ]; then
+        rm -f "$STAGING_DIR"/aspach_tmp_*_restore_* 2>/dev/null
+    fi
+
     mkdir -p "$RESTORE_DIR" "$STAGING_DIR"
 
+    # Check if we are resuming an interrupted session
+    local is_resume=false
+    local saved_nullglob
+    saved_nullglob=$(shopt -p nullglob)
+    shopt -s nullglob
+    local existing_markers=("${RESTORE_DIR}/.aspach_restored_"*)
+    eval "$saved_nullglob"
+
+    if [ ${#existing_markers[@]} -gt 0 ]; then
+        is_resume=true
+        log "[INFO] Interrupted session detected. Resuming restore from where it left off..."
+    fi
+
     if [ -n "$(ls -A "$RESTORE_DIR" 2>/dev/null)" ]; then
-        log "[WARNING] Restore destination is not empty: $RESTORE_DIR"
-        if ! confirm "Proceed? Existing files may be overwritten."; then
-            return 1
+        if [ "$is_resume" = true ]; then
+            log "[INFO] Bypassing non-empty directory prompt for resume session."
+        else
+            log "[WARNING] Restore destination is not empty: $RESTORE_DIR"
+            if ! confirm "Proceed? Existing files may be overwritten."; then
+                return 1
+            fi
         fi
     fi
 
@@ -366,7 +388,7 @@ run_restore() {
 
     if [ ${#archives[@]} -eq 0 ]; then
         log "[ERR] No backup archives found in $remote_current"
-        mark_backup_failed
+        mark_job_failed
         return 1
     fi
 
@@ -374,6 +396,10 @@ run_restore() {
     if [ "$HAS_ZSTD" != true ]; then
         for arch in "${archives[@]}"; do
             if [[ "$arch" == *.tar.zst ]]; then
+                # Skip zstd dependency check if this archive is already restored
+                if [ -f "${RESTORE_DIR}/.aspach_restored_${arch}" ]; then
+                    continue
+                fi
                 log "[ERR] One or more archives require 'zstd' to extract, but 'zstd' is missing."
                 log "[ERR] Please install 'zstd' and try again to prevent mid-run failures."
                 return 1
@@ -387,6 +413,14 @@ run_restore() {
     local JOB_COUNT=0
     for arch in "${archives[@]}"; do
         check_halt
+        
+        # Check if this archive has already been successfully restored (Resume Check)
+        local marker_file="${RESTORE_DIR}/.aspach_restored_${arch}"
+        if [ -f "$marker_file" ]; then
+            log "[~] Already restored (Skip): $arch"
+            continue
+        fi
+
         log "[>] Restoring: $arch"
 
         if [ "$DRY_RUN" = true ]; then
@@ -399,20 +433,24 @@ run_restore() {
 
         (
             if ! rclone copyto "$remote_current/$arch" "$staging_path" \
-                -P --transfers "$RCLONE_TRANSFERS" --checkers "$RCLONE_CHECKERS" >/dev/null 2>&1; then
-                log "[ERR] Download failed: $arch"
-                mark_backup_failed
+                -P --transfers "$RCLONE_TRANSFERS" --checkers "$RCLONE_CHECKERS" >> "$LOG_FILE" 2>&1; then
+                log "[ERR] Download failed: $arch (Check log file for details)"
+                mark_job_failed
                 exit 1
             fi
 
-            if ! extract_archive "$staging_path" "$RESTORE_DIR" >/dev/null 2>&1; then
-                log "[ERR] Extract failed: $arch"
-                mark_backup_failed
+            if ! extract_archive "$staging_path" "$RESTORE_DIR" >> "$LOG_FILE" 2>&1; then
+                log "[ERR] Extract failed: $arch (Check log file for details)"
+                mark_job_failed
                 rm -f "$staging_path"
                 exit 1
             fi
 
             rm -f "$staging_path"
+            
+            # Create parallel-safe state marker file on success
+            touch "$marker_file" 2>/dev/null
+            
             log "[OK] Restored: $arch"
         ) &
 
@@ -425,13 +463,17 @@ run_restore() {
     wait
 
     # Check for any failures registered during background parallel jobs
-    if [ -f "$BACKUP_FAIL_MARKER" ]; then
+    if [ -f "$JOB_FAIL_MARKER" ]; then
         restore_failures=1
     fi
 
     if [ "$restore_failures" -gt 0 ]; then
+        # Do NOT remove the state markers on failure so we can resume next time!
         return 1
     fi
+    
+    # Clean up all temporary state markers ONLY on 100% successful restore
+    rm -f "${RESTORE_DIR}"/.aspach_restored_* 2>/dev/null
     log "[INFO] All archives extracted under: $RESTORE_DIR"
     return 0
 }
@@ -467,18 +509,18 @@ process_partition() {
         return 0
     fi
 
-    # 3. Compress
+    # 3. Compress (Outputs and errors are redirected to LOG_FILE for a clean, non-interleaved parallel screen)
     log "[>] Compressing: $archive_label..."
-    $COMPRESS_CMD "$archive_path" -C "$SOURCE_DIR" "${items[@]}"
+    $COMPRESS_CMD "$archive_path" -C "$SOURCE_DIR" "${items[@]}" >> "$LOG_FILE" 2>&1
     
     if [ $? -ne 0 ]; then
-        log "[ERR] Compression failed: $archive_label"
+        log "[ERR] Compression failed: $archive_label (Check log file for details)"
         rm -f "$archive_path"
-        mark_backup_failed
+        mark_job_failed
         return 1
     fi
 
-    # 4. Upload
+    # 4. Upload (Outputs and errors are redirected to LOG_FILE)
     log "[^] Uploading: $archive_label..."
     local old_path="$RCLONE_REMOTE/old_versions/$(date '+%Y%m%d-%H%M')"
     # Use an array to prevent word splitting on paths containing spaces or special characters
@@ -492,7 +534,7 @@ process_partition() {
         --drive-acknowledge-abuse
     )
 
-    rclone copyto "$archive_path" "$REMOTE_CURRENT/$archive_label.$EXT" "${r_flags[@]}"
+    rclone copyto "$archive_path" "$REMOTE_CURRENT/$archive_label.$EXT" "${r_flags[@]}" >> "$LOG_FILE" 2>&1
 
     if [ $? -eq 0 ]; then
         log "[OK] Success: $archive_label"
@@ -501,9 +543,9 @@ process_partition() {
         return 0
     fi
 
-    log "[ERR] Upload failed: $archive_label"
+    log "[ERR] Upload failed: $archive_label (Check log file for details)"
     rm -f "$archive_path"
-    mark_backup_failed
+    mark_job_failed
     return 1
 }
 
@@ -557,7 +599,7 @@ recursive_process_folder() {
             fi
 
             if [ -d "$item" ] && [ "$item_size" -gt $((SPLIT_THRESHOLD_GB * 1024 * 1024 * 1024)) ]; then
-                # Big sub-directory
+                # Big sub-directory: Recurse (Only passing the directory path now!)
                 big_item_found=true
                 recursive_process_folder "$item"
             else
@@ -621,23 +663,28 @@ process_source_root_files() {
 # --- RESTORE MAIN ---
 if [ "$MODE" = restore ]; then
     run_restore
-    BACKUP_HAD_FAILURES=false
-    [ -f "$BACKUP_FAIL_MARKER" ] && BACKUP_HAD_FAILURES=true
-    rm -f "$BACKUP_FAIL_MARKER"
+    HAD_FAILURES=false
+    [ -f "$JOB_FAIL_MARKER" ] && HAD_FAILURES=true
+    rm -f "$JOB_FAIL_MARKER"
 
     log "--------------------------------------------------------"
-    if [ "$BACKUP_HAD_FAILURES" = true ]; then
+    if [ "$HAD_FAILURES" = true ]; then
         log "RESTORE PROCESS COMPLETED WITH ERRORS."
     else
         log "RESTORE PROCESS COMPLETED."
     fi
     log "--------------------------------------------------------"
     SUCCESSFUL_EXIT=true
-    [ "$BACKUP_HAD_FAILURES" = true ] && exit 1
+    [ "$HAD_FAILURES" = true ] && exit 1
     exit 0
 fi
 
 # --- BACKUP MAIN ---
+
+# Pre-flight Staging Clean: Remove any orphaned temporary backup files from previous crashes/SIGKILLs
+if [ -d "$STAGING_DIR" ]; then
+    rm -f "$STAGING_DIR"/aspach_tmp_* 2>/dev/null
+fi
 
 # 1. Source Directory Existence Check
 if [ ! -d "$SOURCE_DIR" ]; then
@@ -677,7 +724,7 @@ for f in "$SOURCE_DIR"/*/; do
     check_halt
     [ -e "$f" ] || continue
     f=${f%/}
-    # Call the recursive processor
+    # Call the recursive processor (Now only needs the directory path)
     recursive_process_folder "$f" &
     
     ((JOB_COUNT++))
@@ -688,12 +735,12 @@ done
 shopt -u dotglob
 wait
 
-BACKUP_HAD_FAILURES=false
-[ -f "$BACKUP_FAIL_MARKER" ] && BACKUP_HAD_FAILURES=true
-rm -f "$BACKUP_FAIL_MARKER"
+HAD_FAILURES=false
+[ -f "$JOB_FAIL_MARKER" ] && HAD_FAILURES=true
+rm -f "$JOB_FAIL_MARKER"
 
 log "--------------------------------------------------------"
-if [ "$BACKUP_HAD_FAILURES" = true ]; then
+if [ "$HAD_FAILURES" = true ]; then
     log "BACKUP PROCESS COMPLETED WITH ERRORS."
 else
     log "BACKUP PROCESS COMPLETED."
@@ -705,4 +752,5 @@ else
 fi
 log "--------------------------------------------------------"
 SUCCESSFUL_EXIT=true
-[ "$BACKUP_HAD_FAILURES" = true ] && exit 1
+[ "$HAD_FAILURES" = true ] && exit 1
+exit 0
