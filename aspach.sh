@@ -258,6 +258,15 @@ if [ "$IS_LOCAL_PATH" = false ]; then
     fi
 fi
 
+# Check if the target is a Google Drive remote
+IS_GOOGLE_DRIVE=false
+if [ "$IS_LOCAL_PATH" = false ]; then
+    # Query rclone configuration to check the remote type
+    if rclone config show "$REMOTE_NAME" 2>/dev/null | grep -Eq "type\s*=\s*drive"; then
+        IS_GOOGLE_DRIVE=true
+    fi
+fi
+
 REMOTE_CURRENT="$RCLONE_REMOTE/current"
 
 if [ "$MODE" = restore ]; then
@@ -550,16 +559,22 @@ process_partition() {
     # 4. Upload (Outputs and errors are redirected to LOG_FILE)
     log "[^] Uploading: $archive_label..."
     local old_path="$RCLONE_REMOTE/old_versions/$(date '+%Y%m%d-%H%M')"
-    # Use an array to prevent word splitting on paths containing spaces or special characters
+    # Common rclone flags used across all backends (Local, S3, Gdrive, etc.)
     local r_flags=(
         -P -v
         --backup-dir "$old_path"
         --checksum
-        --drive-chunk-size 128M
         --transfers "$RCLONE_TRANSFERS"
         --checkers "$RCLONE_CHECKERS"
-        --drive-acknowledge-abuse
     )
+
+    # Append Google Drive specific flags if the target is Google Drive
+    if [ "$IS_GOOGLE_DRIVE" = true ]; then
+        r_flags+=(
+            --drive-chunk-size 128M
+            --drive-acknowledge-abuse
+        )
+    fi
 
     rclone copyto "$archive_path" "$REMOTE_CURRENT/$archive_label.$EXT" "${r_flags[@]}" >> "$LOG_FILE" 2>&1
 
