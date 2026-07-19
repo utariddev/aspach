@@ -219,16 +219,43 @@ log "WARNING: NO WARRANTY - Use this script at your own risk."
 log "Log File  : $LOG_FILE"
 log "Mode      : $MODE"
 
-# --- REMOTE VALIDATION ---
+# --- REMOTE/LOCAL PATH DETECTION ---
 if [ -z "$RCLONE_REMOTE" ]; then
     echo "[ERR] RCLONE_REMOTE is missing!"; rclone listremotes | sed 's/^/  - /'; exit 1
 fi
 
 RCLONE_REMOTE="${RCLONE_REMOTE%/}"
 
-REMOTE_NAME="${RCLONE_REMOTE%%:*}"
-if ! rclone listremotes | grep -Fxq "${REMOTE_NAME}:"; then
-    echo "[ERR] Remote '${REMOTE_NAME}:' not found!"; rclone listremotes | sed 's/^/  - /'; exit 1
+# check local path
+IS_LOCAL_PATH=false
+if [[ "$RCLONE_REMOTE" != *:* ]] || [[ "$RCLONE_REMOTE" == /* || "$RCLONE_REMOTE" == ./* || "$RCLONE_REMOTE" == ~/* ]]; then
+    IS_LOCAL_PATH=true
+    if command -v realpath >/dev/null 2>&1; then
+        RCLONE_REMOTE=$(realpath -m "$RCLONE_REMOTE")
+    fi
+fi
+
+# user confirmation
+if [ "$IS_LOCAL_PATH" = true ]; then
+    log "[INFO] Yedekleme hedefi YEREL DOSYA YOLU olarak tespit edildi: '$RCLONE_REMOTE'"
+    if ! confirm "Hedefin YEREL bir dosya yolu olduğunu onaylıyor musunuz?"; then
+        log "[INFO] İşlem kullanıcı tarafından iptal edildi."
+        exit 0
+    fi
+else
+    log "[INFO] Yedekleme hedefi UZAK (RCLONE) REMOTE olarak tespit edildi: '$RCLONE_REMOTE'"
+    if ! confirm "Hedefin UZAK bir rclone remote olduğunu onaylıyor musunuz?"; then
+        log "[INFO] İşlem kullanıcı tarafından iptal edildi."
+        exit 0
+    fi
+fi
+
+# --- REMOTE VALIDATION ---
+if [ "$IS_LOCAL_PATH" = false ]; then
+    REMOTE_NAME="${RCLONE_REMOTE%%:*}"
+    if ! rclone listremotes | grep -Fxq "${REMOTE_NAME}:"; then
+        echo "[ERR] Remote '${REMOTE_NAME}:' not found!"; rclone listremotes | sed 's/^/  - /'; exit 1
+    fi
 fi
 
 REMOTE_CURRENT="$RCLONE_REMOTE/current"
